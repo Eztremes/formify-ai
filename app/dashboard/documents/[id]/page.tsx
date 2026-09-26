@@ -1,11 +1,17 @@
+"use client";
+
 import Link from "next/link";
+import { useState } from "react";
 import {
   ArrowLeft,
   Download,
   MoreHorizontal,
   Save,
   Sparkles,
+  Upload,
 } from "lucide-react";
+
+import PDFViewer from "@/components/editor/PDFViewer";
 
 interface DocumentPageProps {
   params: Promise<{
@@ -13,10 +19,25 @@ interface DocumentPageProps {
   }>;
 }
 
-export default async function DocumentPage({
+export default function DocumentPage({
   params,
 }: DocumentPageProps) {
-  const { id } = await params;
+  const [file, setFile] = useState<File | null>(null);
+
+  const handleFileChange = (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const selectedFile = event.target.files?.[0];
+
+    if (!selectedFile) return;
+
+    if (selectedFile.type !== "application/pdf") {
+      alert("Please select a PDF file.");
+      return;
+    }
+
+    setFile(selectedFile);
+  };
 
   return (
     <div className="flex min-h-screen flex-col bg-muted/20">
@@ -33,16 +54,28 @@ export default async function DocumentPage({
 
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">
-              Quarterly Report
+              {file?.name ?? "PDF Workspace"}
             </p>
 
             <p className="text-xs text-muted-foreground">
-              PDF · {id}
+              {file ? "PDF document" : "No document loaded"}
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
+          <label className="hidden h-9 cursor-pointer items-center gap-2 rounded-lg bg-foreground px-3 text-sm font-medium text-background transition-opacity hover:opacity-90 sm:flex">
+            <Upload className="h-4 w-4" />
+            Upload PDF
+
+            <input
+              type="file"
+              accept="application/pdf"
+              className="hidden"
+              onChange={handleFileChange}
+            />
+          </label>
+
           <button
             type="button"
             className="hidden h-9 items-center gap-2 rounded-lg border border-border/60 bg-background px-3 text-sm font-medium transition-colors hover:bg-muted sm:flex"
@@ -98,23 +131,9 @@ export default async function DocumentPage({
           </button>
         </aside>
 
-        {/* PDF canvas area */}
-        <section className="min-w-0 flex-1 overflow-auto p-6 md:p-10">
-          <div className="mx-auto flex min-h-[700px] max-w-3xl items-center justify-center rounded-2xl border border-dashed border-border/70 bg-background shadow-sm">
-            <div className="max-w-sm px-6 text-center">
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl border border-border/60 bg-muted/40">
-                <Download className="h-6 w-6 text-muted-foreground" />
-              </div>
-
-              <h2 className="mt-5 text-xl font-semibold tracking-tight">
-                PDF workspace
-              </h2>
-
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                The PDF viewer and editing canvas will appear here.
-              </p>
-            </div>
-          </div>
+        {/* PDF area */}
+        <section className="min-w-0 flex-1 overflow-auto p-4 md:p-6">
+          <PDFViewer file={file} />
         </section>
 
         {/* AI panel */}
