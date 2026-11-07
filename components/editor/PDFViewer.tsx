@@ -2,6 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import "pdfjs-dist/web/pdf_viewer.css";
+import HighlightLayer from "@/components/editor/HighlightLayer";
+import HighlightToolbar from "@/components/editor/HighlightToolbar";
+
+import type {
+  AnnotationColor,
+  HighlightAnnotation,
+} from "@/app/types/annotations";
+
 import {
   ChevronLeft,
   ChevronRight,
@@ -13,11 +21,9 @@ import {
 import * as pdfjsLib from "pdfjs-dist";
 import { TextLayer } from "pdfjs-dist";
 
-
-
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
-  import.meta.url
+  import.meta.url,
 ).toString();
 
 interface PDFViewerProps {
@@ -27,6 +33,12 @@ interface PDFViewerProps {
 export default function PDFViewer({ file }: PDFViewerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
+
+  const pageContainerRef = useRef<HTMLDivElement>(null);
+
+  const [annotations, setAnnotations] = useState<HighlightAnnotation[]>([]);
+
+  const [hasSelection, setHasSelection] = useState(false);
 
   const [pdfDocument, setPdfDocument] =
     useState<pdfjsLib.PDFDocumentProxy | null>(null);
@@ -61,9 +73,9 @@ export default function PDFViewer({ file }: PDFViewerProps) {
 
         const pdf = await loadingTask.promise;
 
-       if (cancelled) {
-  return;
-}
+        if (cancelled) {
+          return;
+        }
 
         setPdfDocument(pdf);
       } catch (err) {
@@ -88,111 +100,180 @@ export default function PDFViewer({ file }: PDFViewerProps) {
   }, [file]);
 
   // Render current page
- useEffect(() => {
-  let cancelled = false;
-  let textLayer: TextLayer | null = null;
+  useEffect(() => {
+    let cancelled = false;
+    let textLayer: TextLayer | null = null;
 
-  const renderPage = async () => {
-    if (!pdfDocument || !canvasRef.current || !textLayerRef.current) {
+    const renderPage = async () => {
+      if (!pdfDocument || !canvasRef.current || !textLayerRef.current) {
+        return;
+      }
+
+      try {
+        setRendering(true);
+        setError(null);
+
+        const page = await pdfDocument.getPage(currentPage);
+
+        if (cancelled) return;
+
+        const viewport = page.getViewport({
+          scale,
+        });
+
+        const canvas = canvasRef.current;
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Unable to access PDF canvas.");
+        }
+
+        /*
+         * -------------------------
+         * Canvas layer
+         * -------------------------
+         */
+
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+
+        context.clearRect(0, 0, canvas.width, canvas.height);
+
+        await page.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+        }).promise;
+
+        if (cancelled) return;
+
+        /*
+         * -------------------------
+         * Text layer
+         * -------------------------
+         */
+
+        const textLayerContainer = textLayerRef.current;
+
+        textLayerContainer.replaceChildren();
+
+        textLayerContainer.style.width = `${viewport.width}px`;
+        textLayerContainer.style.height = `${viewport.height}px`;
+
+        textLayerContainer.style.setProperty(
+          "--total-scale-factor",
+          String(viewport.scale),
+        );
+
+        const textContentSource = await page.getTextContent();
+
+        if (cancelled) return;
+
+        textLayer = new TextLayer({
+          textContentSource,
+          container: textLayerContainer,
+          viewport,
+        });
+
+        await textLayer.render();
+      } catch (err) {
+        console.error("PDF rendering error:", err);
+
+        if (!cancelled) {
+          setError("Unable to render this page.");
+        }
+      } finally {
+        if (!cancelled) {
+          setRendering(false);
+        }
+      }
+    };
+
+    renderPage();
+
+    return () => {
+      cancelled = true;
+
+      if (textLayer) {
+        textLayer.cancel();
+        textLayer = null;
+      }
+    };
+  }, [pdfDocument, currentPage, scale]);
+
+  const checkSelection = () => {
+    const selection = window.getSelection();
+    const container = textLayerRef.current;
+
+    if (!selection || !container || selection.isCollapsed) {
+      setHasSelection(false);
       return;
     }
 
-    try {
-      setRendering(true);
-      setError(null);
+    const range = selection.getRangeAt(0);
 
-      const page = await pdfDocument.getPage(currentPage);
+    const valid =
+      container.contains(range.startContainer) &&
+      container.contains(range.endContainer) &&
+      selection.toString().trim().length > 0;
 
-      if (cancelled) return;
+    setHasSelection(valid);
+  };
 
-      const viewport = page.getViewport({
-        scale,
-      });
+  const handleHighlight = (color: AnnotationColor) => {
+    const selection = window.getSelection();
+    const container = textLayerRef.current;
+    const pageContainer = pageContainerRef.current;
 
-      const canvas = canvasRef.current;
-      const context = canvas.getContext("2d");
+    if (!selection || selection.isCollapsed || !container || !pageContainer) {
+      return;
+    }
 
-      if (!context) {
-        throw new Error("Unable to access PDF canvas.");
-      }
+    const range = selection.getRangeAt(0);
 
-      /*
-       * -------------------------
-       * Canvas layer
-       * -------------------------
-       */
+    if (
+      !container.contains(range.startContainer) ||
+      !container.contains(range.endContainer)
+    ) {
+      return;
+    }
 
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+    const pageBounds = pageContainer.getBoundingClientRect();
 
-      context.clearRect(
-        0,
-        0,
-        canvas.width,
-        canvas.height
+    const rectangles = Array.from(range.getClientRects())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => ({
+        x: (rect.left - pageBounds.left) / pageBounds.width,
+        y: (rect.top - pageBounds.top) / pageBounds.height,
+        width: rect.width / pageBounds.width,
+        height: rect.height / pageBounds.height,
+      }))
+      .filter(
+        (rect) =>
+          rect.x >= 0 &&
+          rect.y >= 0 &&
+          rect.x + rect.width <= 1.001 &&
+          rect.y + rect.height <= 1.001,
       );
 
-      await page.render({
-        canvas,
-        canvasContext: context,
-        viewport,
-      }).promise;
+    if (rectangles.length === 0) return;
 
-      if (cancelled) return;
+    const annotation: HighlightAnnotation = {
+      id: crypto.randomUUID(),
+      documentId: file?.name ?? "unknown",
+      pageNumber: currentPage,
+      type: "highlight",
+      color,
+      selectedText: selection.toString(),
+      rectangles,
+      createdAt: new Date().toISOString(),
+    };
 
-      /*
-       * -------------------------
-       * Text layer
-       * -------------------------
-       */
+    setAnnotations((previous) => [...previous, annotation]);
 
-      const textLayerContainer = textLayerRef.current;
-
-      textLayerContainer.replaceChildren();
-
-      textLayerContainer.style.width = `${viewport.width}px`;
-      textLayerContainer.style.height = `${viewport.height}px`;
-
-      textLayerContainer.style.setProperty(
-  "--total-scale-factor",
-  String(viewport.scale)
-);
-
-      const textContentSource = await page.getTextContent();
-
-      if (cancelled) return;
-
-      textLayer = new TextLayer({
-        textContentSource,
-        container: textLayerContainer,
-        viewport,
-      });
-
-      await textLayer.render();
-    } catch (err) {
-      console.error("PDF rendering error:", err);
-
-      if (!cancelled) {
-        setError("Unable to render this page.");
-      }
-    } finally {
-      if (!cancelled) {
-        setRendering(false);
-      }
-    }
+    selection.removeAllRanges();
+    setHasSelection(false);
   };
-
-  renderPage();
-
-  return () => {
-    cancelled = true;
-
-    if (textLayer) {
-      textLayer.cancel();
-      textLayer = null;
-    }
-  };
-}, [pdfDocument, currentPage, scale]);
 
   const goToPreviousPage = () => {
     setCurrentPage((page) => Math.max(1, page - 1));
@@ -201,9 +282,7 @@ export default function PDFViewer({ file }: PDFViewerProps) {
   const goToNextPage = () => {
     if (!pdfDocument) return;
 
-    setCurrentPage((page) =>
-      Math.min(pdfDocument.numPages, page + 1)
-    );
+    setCurrentPage((page) => Math.min(pdfDocument.numPages, page + 1));
   };
 
   const zoomOut = () => {
@@ -249,9 +328,7 @@ export default function PDFViewer({ file }: PDFViewerProps) {
     return (
       <div className="flex min-h-[700px] items-center justify-center rounded-2xl border border-border/60 bg-muted/30">
         <div className="text-center">
-          <p className="font-medium">
-            Something went wrong
-          </p>
+          <p className="font-medium">Something went wrong</p>
 
           <p className="mt-2 text-sm text-muted-foreground">
             {error ?? "Unable to load the document."}
@@ -292,53 +369,67 @@ export default function PDFViewer({ file }: PDFViewerProps) {
           </button>
         </div>
 
-        {/* Zoom controls */}
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={zoomOut}
-            disabled={scale <= 0.5}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-            aria-label="Zoom out"
-          >
-            <Minus className="h-4 w-4" />
-          </button>
+        {/* Highlight and zoom controls */}
+        <div className="flex items-center gap-3">
+          <HighlightToolbar
+            onHighlight={handleHighlight}
+            disabled={!hasSelection || rendering}
+          />
 
-          <span className="w-14 text-center text-xs font-medium">
-            {Math.round(scale * 100)}%
-          </span>
+          <div className="h-5 w-px bg-border" />
 
-          <button
-            type="button"
-            onClick={zoomIn}
-            disabled={scale >= 2.5}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
-            aria-label="Zoom in"
-          >
-            <Plus className="h-4 w-4" />
-          </button>
+          {/* Zoom controls */}
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={zoomOut}
+              disabled={scale <= 0.5}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+              aria-label="Zoom out"
+            >
+              <Minus className="h-4 w-4" />
+            </button>
+
+            <span className="w-14 text-center text-xs font-medium">
+              {Math.round(scale * 100)}%
+            </span>
+
+            <button
+              type="button"
+              onClick={zoomIn}
+              disabled={scale >= 2.5}
+              className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+              aria-label="Zoom in"
+            >
+              <Plus className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* PDF canvas */}
+      {/* PDF canvas, highlight layer and text layer */}
       <div className="flex flex-1 items-start justify-center overflow-auto p-6">
-        <div className="relative">
-  {rendering && (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/60 backdrop-blur-[1px]">
-      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-    </div>
-  )}
+        <div
+          ref={pageContainerRef}
+          className="relative shrink-0"
+          onMouseUp={checkSelection}
+          onKeyUp={checkSelection}
+        >
+          {rendering && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/60 backdrop-blur-[1px]">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+            </div>
+          )}
 
-  <canvas
-    ref={canvasRef}
-    className="block h-auto max-w-none bg-white shadow-xl"
-  />
+          <canvas
+            ref={canvasRef}
+            className="block h-auto max-w-none bg-white shadow-xl"
+          />
 
-  <div
-    ref={textLayerRef}
-    className="textLayer absolute left-0 top-0"
-  />
-</div>
+          <HighlightLayer annotations={annotations} pageNumber={currentPage} />
+
+          <div ref={textLayerRef} className="textLayer absolute left-0 top-0" />
+        </div>
       </div>
     </div>
   );
